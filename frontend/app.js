@@ -64,6 +64,21 @@ function updateThemeIcon() {
 
 initDarkMode();
 
+// --- Uploader name (optional, persisted locally) ---
+const UPLOADER_NAME_KEY = 'immich_drop_uploader_name';
+function getUploaderName(){
+  try { return (localStorage.getItem(UPLOADER_NAME_KEY) || '').trim(); } catch { return ''; }
+}
+function initUploaderName(){
+  const input = document.getElementById('uploaderNameInput');
+  if (!input) return;
+  input.value = getUploaderName();
+  input.addEventListener('input', () => {
+    try { localStorage.setItem(UPLOADER_NAME_KEY, input.value.trim()); } catch {}
+  });
+}
+initUploaderName();
+
 // --- Load minimal config ---
 (async function loadConfig(){
   try{
@@ -220,6 +235,8 @@ async function uploadWhole(next){
   form.append('last_modified', next.file.lastModified || '');
   if (INVITE_TOKEN) form.append('invite_token', INVITE_TOKEN);
   form.append('fingerprint', FINGERPRINT);
+  const uploaderName = getUploaderName();
+  if (uploaderName) form.append('uploader_name', uploaderName);
   const res = await fetch('/api/upload', { method:'POST', body: form });
   const body = await res.json().catch(()=>({}));
   if(!res.ok && next.status!=='error'){
@@ -287,7 +304,8 @@ async function uploadChunked(next){
     invite_token: INVITE_TOKEN || '',
     content_type: next.file.type || 'application/octet-stream',
     fingerprint: FINGERPRINT,
-    total_chunks: total
+    total_chunks: total,
+    uploader_name: getUploaderName()
   }) });
   const body = await rc.json().catch(()=>({}));
   if (!rc.ok && next.status!=='error'){
