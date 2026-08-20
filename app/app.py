@@ -16,7 +16,7 @@ import json
 import hashlib
 import os
 import sqlite3
-from datetime import datetime
+from datetime import datetime, timezone
 from typing import Dict, List, Optional
 
 import requests
@@ -234,6 +234,16 @@ def sanitize_uploader_name(name: Optional[str]) -> Optional[str]:
     cleaned = ''.join(ch for ch in str(name) if ord(ch) >= 32 and ord(ch) != 127).strip()
     cleaned = cleaned[:60]
     return cleaned or None
+
+def to_immich_iso(dt: datetime) -> str:
+    """Return an ISO 8601 string with a timezone offset, as Immich v3+ requires.
+
+    Naive datetimes here are already UTC wall-clock values (EXIF/last-modified/utcnow),
+    so we label them UTC without shifting the value.
+    """
+    if dt.tzinfo is None:
+        dt = dt.replace(tzinfo=timezone.utc)
+    return dt.isoformat()
 
 def read_exif_datetimes(file_bytes: bytes):
     """
@@ -505,8 +515,8 @@ async def api_upload(
     exif_created, exif_modified = read_exif_datetimes(raw)
     created_at = exif_created or (datetime.fromtimestamp(last_modified / 1000) if last_modified else datetime.utcnow())
     modified_at = exif_modified or created_at
-    created_iso = created_at.isoformat()
-    modified_iso = modified_at.isoformat()
+    created_iso = to_immich_iso(created_at)
+    modified_iso = to_immich_iso(modified_at)
 
     device_asset_id = f"{file.filename}-{last_modified or 0}-{size}"
 
@@ -887,8 +897,8 @@ async def api_upload_chunk_complete(request: Request) -> JSONResponse:
     exif_created, exif_modified = read_exif_datetimes(raw)
     created_at = exif_created or (datetime.fromtimestamp(last_modified / 1000) if last_modified else datetime.utcnow())
     modified_at = exif_modified or created_at
-    created_iso = created_at.isoformat()
-    modified_iso = modified_at.isoformat()
+    created_iso = to_immich_iso(created_at)
+    modified_iso = to_immich_iso(modified_at)
     device_asset_id = f"{file_like_name}-{last_modified or 0}-{file_size}"
 
     # Local duplicate checks
