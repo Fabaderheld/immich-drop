@@ -57,6 +57,14 @@ logger = logging.getLogger("immich_drop")
 app.add_middleware(SessionMiddleware, secret_key=SETTINGS.session_secret, same_site="lax")
 
 FRONTEND_DIR = os.path.join(os.path.dirname(os.path.dirname(__file__)), "frontend")
+
+@app.middleware("http")
+async def gate_static_public_page(request: Request, call_next):
+    """Block the static index.html bypass of the '/' public-upload-page gate."""
+    if request.url.path == "/static/index.html" and not SETTINGS.public_upload_page_enabled:
+        return RedirectResponse(url="/login")
+    return await call_next(request)
+
 app.mount("/static", StaticFiles(directory=FRONTEND_DIR), name="static")
 
 # Chunk upload storage
@@ -507,6 +515,8 @@ async def api_upload(
     uploader_name: Optional[str] = Form(None),
 ):
     """Receive a file, check duplicates, forward to Immich; stream progress via WS."""
+    if not SETTINGS.public_upload_page_enabled and not invite_token:
+        return JSONResponse({"error": "public_upload_disabled"}, status_code=403)
     uploader_name = sanitize_uploader_name(uploader_name)
     raw = await file.read()
     size = len(raw)
@@ -762,6 +772,9 @@ async def api_upload_chunk_init(request: Request) -> JSONResponse:
         return JSONResponse({"error": "invalid_json"}, status_code=400)
     item_id = (data or {}).get("item_id")
     session_id = (data or {}).get("session_id")
+    invite_token = (data or {}).get("invite_token")
+    if not SETTINGS.public_upload_page_enabled and not invite_token:
+        return JSONResponse({"error": "public_upload_disabled"}, status_code=403)
     if not item_id or not session_id:
         return JSONResponse({"error": "missing_ids"}, status_code=400)
     d = _chunk_dir(session_id, item_id)
@@ -772,7 +785,7 @@ async def api_upload_chunk_init(request: Request) -> JSONResponse:
             "name": (data or {}).get("name"),
             "size": (data or {}).get("size"),
             "last_modified": (data or {}).get("last_modified"),
-            "invite_token": (data or {}).get("invite_token"),
+            "invite_token": invite_token,
             "content_type": (data or {}).get("content_type") or "application/octet-stream",
             "created_at": datetime.utcnow().isoformat(),
         }
@@ -794,6 +807,8 @@ async def api_upload_chunk(
     chunk: UploadFile = Form(...),
 ) -> JSONResponse:
     """Receive a single chunk; write to disk under chunk directory."""
+    if not SETTINGS.public_upload_page_enabled and not invite_token:
+        return JSONResponse({"error": "public_upload_disabled"}, status_code=403)
     d = _chunk_dir(session_id, item_id)
     try:
         os.makedirs(d, exist_ok=True)
@@ -836,6 +851,8 @@ async def api_upload_chunk_complete(request: Request) -> JSONResponse:
     fingerprint = (data or {}).get("fingerprint")
     uploader_name = sanitize_uploader_name((data or {}).get("uploader_name"))
     content_type = (data or {}).get("content_type") or "application/octet-stream"
+    if not SETTINGS.public_upload_page_enabled and not invite_token:
+        return JSONResponse({"error": "public_upload_disabled"}, status_code=403)
     if not item_id or not session_id:
         return JSONResponse({"error": "missing_ids"}, status_code=400)
     d = _chunk_dir(session_id, item_id)
