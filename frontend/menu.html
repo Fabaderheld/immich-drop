@@ -125,6 +125,9 @@
 
   <script src="/static/header.js"></script>
   <script>
+    function escapeHtml(s){
+      return String(s == null ? '' : s).replace(/[&<>"']/g, ch => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[ch]));
+    }
     const albumSelectWrap = document.getElementById('albumSelectWrap');
     const albumSelect = document.getElementById('albumSelect');
     const albumInputWrap = document.getElementById('albumInputWrap');
@@ -371,7 +374,7 @@
                   <button class="dlgClose rounded-lg border px-2 py-1 text-xs dark:border-gray-600">Close</button>
                 </div>
                 <div class="max-h-[60vh] overflow-auto">
-                  ${items.length? `<table class="w-full text-sm"><thead><tr class="text-left border-b dark:border-gray-700"><th class="py-1">When</th><th class="py-1">IP</th><th class="py-1">Filename</th><th class="py-1">Size</th><th class="py-1">Fingerprint</th></tr></thead><tbody>` + items.map(it=>`<tr class="border-b dark:border-gray-800"><td class="py-1">${new Date(it.uploadedAt).toLocaleString()}</td><td class="py-1">${it.ip||''}</td><td class="py-1">${it.filename||''}</td><td class="py-1">${(it.size||0).toLocaleString()}</td><td class="py-1">${(it.fingerprint||'').slice(0,16)}</td></tr>`).join('') + `</tbody></table>` : '<div class="text-sm text-gray-500">No uploads yet.</div>'}
+                  ${items.length? `<table class="w-full text-sm"><thead><tr class="text-left border-b dark:border-gray-700"><th class="py-1">When</th><th class="py-1">Uploader</th><th class="py-1">IP</th><th class="py-1">Filename</th><th class="py-1">Size</th><th class="py-1">Fingerprint</th></tr></thead><tbody>` + items.map(it=>`<tr class="border-b dark:border-gray-800"><td class="py-1">${escapeHtml(new Date(it.uploadedAt).toLocaleString())}</td><td class="py-1">${escapeHtml(it.uploaderName||'')}</td><td class="py-1">${escapeHtml(it.ip||'')}</td><td class="py-1">${escapeHtml(it.filename||'')}</td><td class="py-1">${(it.size||0).toLocaleString()}</td><td class="py-1">${escapeHtml((it.fingerprint||'').slice(0,16))}</td></tr>`).join('') + `</tbody></table>` : '<div class="text-sm text-gray-500">No uploads yet.</div>'}
                 </div>
               </div>
             </div>`;

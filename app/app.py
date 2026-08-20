@@ -16,7 +16,7 @@ import json
 import hashlib
 import os
 import sqlite3
-from datetime import datetime
+from datetime import datetime, timezone
 from typing import Dict, List, Optional
 
 import requests
@@ -99,17 +99,22 @@ def db_init() -> None:
         CREATE TABLE IF NOT EXISTS upload_events (
             id INTEGER PRIMARY KEY AUTOINCREMENT,
             token TEXT,
-            uploadedat TEXT DEFAULT CURRENT_TIMESTAMP,
+            uploaded_at TEXT DEFAULT CURRENT_TIMESTAMP,
             ip TEXT,
-            useragent TEXT,
+            user_agent TEXT,
             fingerprint TEXT,
             filename TEXT,
             size INTEGER,
             checksum TEXT,
-            immichassetid TEXT
+            immich_asset_id TEXT,
+            uploader_name TEXT
         );
         """
     )
+    try:
+        cur.execute("ALTER TABLE upload_events ADD COLUMN uploader_name TEXT")
+    except Exception:
+        pass
     conn.commit()
     conn.close()
 
@@ -221,6 +226,24 @@ def sanitize_filename(name: Optional[str]) -> str:
             cleaned_chars.append(ch)
     cleaned = ''.join(cleaned_chars).strip()
     return cleaned or "file"
+
+def sanitize_uploader_name(name: Optional[str]) -> Optional[str]:
+    """Return a trimmed, control-char-free uploader name capped at 60 chars (None if empty)."""
+    if not name:
+        return None
+    cleaned = ''.join(ch for ch in str(name) if ord(ch) >= 32 and ord(ch) != 127).strip()
+    cleaned = cleaned[:60]
+    return cleaned or None
+
+def to_immich_iso(dt: datetime) -> str:
+    """Return an ISO 8601 string with a timezone offset, as Immich v3+ requires.
+
+    Naive datetimes here are already UTC wall-clock values (EXIF/last-modified/utcnow),
+    so we label them UTC without shifting the value.
+    """
+    if dt.tzinfo is None:
+        dt = dt.replace(tzinfo=timezone.utc)
+    return dt.isoformat()
 
 def read_exif_datetimes(file_bytes: bytes):
     """
@@ -342,6 +365,19 @@ def add_asset_to_album(asset_id: str, request: Optional[Request] = None, album_i
         return False
     except Exception as e:
         logger.exception("Error adding asset to album: %s", e)
+        return False
+
+def set_asset_description(asset_id: str, description: str, request: Optional[Request] = None) -> bool:
+    """Set an asset's description in Immich (used to record the uploader's name). Best-effort."""
+    if not asset_id or not description:
+        return False
+    try:
+        url = f"{SETTINGS.normalized_base_url}/assets/{asset_id}"
+        r = requests.put(url, headers={**immich_headers(request), "Content-Type": "application/json"},
+                          json={"description": description}, timeout=10)
+        return r.status_code in (200, 204)
+    except Exception as e:
+        logger.exception("Error setting asset description: %s", e)
         return False
 
 def immich_ping() -> bool:
@@ -468,8 +504,10 @@ async def api_upload(
     last_modified: Optional[int] = Form(None),
     invite_token: Optional[str] = Form(None),
     fingerprint: Optional[str] = Form(None),
+    uploader_name: Optional[str] = Form(None),
 ):
     """Receive a file, check duplicates, forward to Immich; stream progress via WS."""
+    uploader_name = sanitize_uploader_name(uploader_name)
     raw = await file.read()
     size = len(raw)
     checksum = sha1_hex(raw)
@@ -477,8 +515,8 @@ async def api_upload(
     exif_created, exif_modified = read_exif_datetimes(raw)
     created_at = exif_created or (datetime.fromtimestamp(last_modified / 1000) if last_modified else datetime.utcnow())
     modified_at = exif_modified or created_at
-    created_iso = created_at.isoformat()
-    modified_iso = modified_at.isoformat()
+    created_iso = to_immich_iso(created_at)
+    modified_iso = to_immich_iso(modified_at)
 
     device_asset_id = f"{file.filename}-{last_modified or 0}-{size}"
 
@@ -501,13 +539,10 @@ async def api_upload(
     def gen_encoder() -> MultipartEncoder:
         return MultipartEncoder(fields={
             "assetData": (safe_name, io.BytesIO(raw), file.content_type or "application/octet-stream"),
-            "deviceAssetId": device_asset_id,
-            "deviceId": f"python-{session_id}",
             "fileCreatedAt": created_iso,
             "fileModifiedAt": modified_iso,
             "isFavorite": "false",
             "filename": safe_name,
-            "originalFileName": safe_name,
         })
 
     encoder = gen_encoder()
@@ -636,6 +671,9 @@ async def api_upload(
                         if add_asset_to_album(asset_id, request=request):
                             status += f" (added to album '{SETTINGS.album_name}')"
 
+                    if uploader_name:
+                        set_asset_description(asset_id, f"Uploaded by {uploader_name}", request=request)
+
                 await send_progress(session_id, item_id, "duplicate" if status == "duplicate" else "done", 100, status, asset_id)
 
                 # Increment invite usage on success
@@ -675,7 +713,8 @@ async def api_upload(
                             filename TEXT,
                             size INTEGER,
                             checksum TEXT,
-                            immich_asset_id TEXT
+                            immich_asset_id TEXT,
+                            uploader_name TEXT
                         );
                         """
                     )
@@ -686,8 +725,8 @@ async def api_upload(
                         ip = None
                     ua = request.headers.get('user-agent', '') if request else ''
                     curlg.execute(
-                        "INSERT INTO upload_events (token, ip, user_agent, fingerprint, filename, size, checksum, immich_asset_id) VALUES (?,?,?,?,?,?,?,?)",
-                        (invite_token or '', ip, ua, fingerprint or '', file.filename, size, checksum, asset_id or None)
+                        "INSERT INTO upload_events (token, ip, user_agent, fingerprint, filename, size, checksum, immich_asset_id, uploader_name) VALUES (?,?,?,?,?,?,?,?,?)",
+                        (invite_token or '', ip, ua, fingerprint or '', file.filename, size, checksum, asset_id or None, uploader_name)
                     )
                     connlg.commit()
                     connlg.close()
@@ -795,6 +834,7 @@ async def api_upload_chunk_complete(request: Request) -> JSONResponse:
     last_modified = (data or {}).get("last_modified")
     invite_token = (data or {}).get("invite_token")
     fingerprint = (data or {}).get("fingerprint")
+    uploader_name = sanitize_uploader_name((data or {}).get("uploader_name"))
     content_type = (data or {}).get("content_type") or "application/octet-stream"
     if not item_id or not session_id:
         return JSONResponse({"error": "missing_ids"}, status_code=400)
@@ -857,8 +897,8 @@ async def api_upload_chunk_complete(request: Request) -> JSONResponse:
     exif_created, exif_modified = read_exif_datetimes(raw)
     created_at = exif_created or (datetime.fromtimestamp(last_modified / 1000) if last_modified else datetime.utcnow())
     modified_at = exif_modified or created_at
-    created_iso = created_at.isoformat()
-    modified_iso = modified_at.isoformat()
+    created_iso = to_immich_iso(created_at)
+    modified_iso = to_immich_iso(modified_at)
     device_asset_id = f"{file_like_name}-{last_modified or 0}-{file_size}"
 
     # Local duplicate checks
@@ -881,13 +921,10 @@ async def api_upload_chunk_complete(request: Request) -> JSONResponse:
     def gen_encoder2() -> MultipartEncoder:
         return MultipartEncoder(fields={
             "assetData": (safe_name2, io.BytesIO(raw), content_type or "application/octet-stream"),
-            "deviceAssetId": device_asset_id,
-            "deviceId": f"python-{session_id_local}",
             "fileCreatedAt": created_iso,
             "fileModifiedAt": modified_iso,
             "isFavorite": "false",
             "filename": safe_name2,
-            "originalFileName": safe_name2,
         })
 
     # Invite validation/gating mirrors api_upload
@@ -1003,6 +1040,8 @@ async def api_upload_chunk_complete(request: Request) -> JSONResponse:
                 elif SETTINGS.album_name:
                     if add_asset_to_album(asset_id, request=request):
                         status += f" (added to album '{SETTINGS.album_name}')"
+                if uploader_name:
+                    set_asset_description(asset_id, f"Uploaded by {uploader_name}", request=request)
             await send_progress(session_id_local, item_id_local, "duplicate" if status == "duplicate" else "done", 100, status, asset_id)
             if invite_token:
                 try:
@@ -1039,7 +1078,8 @@ async def api_upload_chunk_complete(request: Request) -> JSONResponse:
                         filename TEXT,
                         size INTEGER,
                         checksum TEXT,
-                        immich_asset_id TEXT
+                        immich_asset_id TEXT,
+                        uploader_name TEXT
                     );
                     """
                 )
@@ -1050,8 +1090,8 @@ async def api_upload_chunk_complete(request: Request) -> JSONResponse:
                     ip = None
                 ua = request.headers.get('user-agent', '') if request else ''
                 curlg.execute(
-                    "INSERT INTO upload_events (token, ip, user_agent, fingerprint, filename, size, checksum, immich_asset_id) VALUES (?,?,?,?,?,?,?,?)",
-                    (invite_token or '', ip, ua, fingerprint or '', file_like_name, file_size, checksum, asset_id or None)
+                    "INSERT INTO upload_events (token, ip, user_agent, fingerprint, filename, size, checksum, immich_asset_id, uploader_name) VALUES (?,?,?,?,?,?,?,?,?)",
+                    (invite_token or '', ip, ua, fingerprint or '', file_like_name, file_size, checksum, asset_id or None, uploader_name)
                 )
                 connlg.commit()
                 connlg.close()
@@ -1595,14 +1635,14 @@ async def api_invite_uploads(token: str, request: Request) -> JSONResponse:
         if not row:
             conn.close()
             return JSONResponse({"error": "forbidden"}, status_code=403)
-        cur.execute("SELECT uploaded_at, ip, user_agent, fingerprint, filename, size, checksum, immich_asset_id FROM upload_events WHERE token = ? ORDER BY uploaded_at DESC LIMIT 500", (token,))
+        cur.execute("SELECT uploaded_at, ip, user_agent, fingerprint, filename, size, checksum, immich_asset_id, uploader_name FROM upload_events WHERE token = ? ORDER BY uploaded_at DESC LIMIT 500", (token,))
         rows = cur.fetchall()
         conn.close()
     except Exception as e:
         logger.exception("Fetch uploads failed: %s", e)
         return JSONResponse({"error": "db_error"}, status_code=500)
     items = []
-    for uploaded_at, ip, ua, fp, filename, size, checksum, asset_id in rows:
+    for uploaded_at, ip, ua, fp, filename, size, checksum, asset_id, uploader_name in rows:
         items.append({
             "uploadedAt": uploaded_at,
             "ip": ip,
@@ -1612,6 +1652,7 @@ async def api_invite_uploads(token: str, request: Request) -> JSONResponse:
             "size": size,
             "checksum": checksum,
             "assetId": asset_id,
+            "uploaderName": uploader_name,
         })
     return JSONResponse({"items": items})
 
