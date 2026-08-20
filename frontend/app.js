@@ -67,12 +67,16 @@ initDarkMode();
 // --- Uploader name (optional, persisted locally) ---
 const UPLOADER_NAME_KEY = 'immich_drop_uploader_name';
 function getUploaderName(){
-  try { return (localStorage.getItem(UPLOADER_NAME_KEY) || '').trim(); } catch { return ''; }
+  try {
+    const input = document.getElementById('uploaderNameInput');
+    if (input) return (input.value || '').trim();
+    return (localStorage.getItem(UPLOADER_NAME_KEY) || '').trim();
+  } catch { return ''; }
 }
 function initUploaderName(){
   const input = document.getElementById('uploaderNameInput');
   if (!input) return;
-  input.value = getUploaderName();
+  try { input.value = (localStorage.getItem(UPLOADER_NAME_KEY) || '').trim(); } catch {}
   input.addEventListener('input', () => {
     try { localStorage.setItem(UPLOADER_NAME_KEY, input.value.trim()); } catch {}
   });
